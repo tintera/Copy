@@ -1,3 +1,4 @@
+```mermaid
 sequenceDiagram
     participant Shell
     participant Main as Main()
@@ -52,3 +53,4 @@ sequenceDiagram
     else error openning a file
         Main ->>+ Shell : Error messsage, error code
     end
+```
