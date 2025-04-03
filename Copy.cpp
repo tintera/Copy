@@ -12,7 +12,7 @@ namespace {
 	std::condition_variable bufferHasSpace;
 	std::condition_variable bufferHasData;
 
-	constexpr size_t BLOCK_SIZE = 4096; // 4KB
+	constexpr size_t BLOCK_SIZE = 1'000'000; // 4KB
 	constexpr std::int8_t NUM_BLOCKS = 3;
 	using block = std::array<char, BLOCK_SIZE>;
 
