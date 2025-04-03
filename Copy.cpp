@@ -9,8 +9,8 @@
 namespace {
 
 	std::mutex mtx;
-	std::condition_variable bufferHasSpace;
-	std::condition_variable bufferHasData;
+	std::condition_variable storeHasSpace;
+	std::condition_variable storeHasData;
 
 	constexpr size_t BLOCK_SIZE = 1'000'000; // 4KB
 	constexpr std::int8_t NUM_BLOCKS = 3;
@@ -52,7 +52,7 @@ namespace {
 		char* getInputPtr(std::unique_lock<std::mutex>& lk)
 		{
 			if (isFull()) {
-				bufferHasSpace.wait(lk, [this]() { return !isFull(); });
+				storeHasSpace.wait(lk, [this]() { return !isFull(); });
 			}
 			return &(cache[nextLoadIdx_()][0]);
 		}
@@ -60,7 +60,7 @@ namespace {
 		auto getOutputPtr(std::unique_lock<std::mutex>& lk)
 		{
 			if (isEmpty()) {
-				bufferHasData.wait(lk, [this]() { return !isEmpty(); });
+				storeHasData.wait(lk, [this]() { return !isEmpty(); });
 			}
 			auto nextIdx = nextWriteIdx_();
 			return std::tuple<char*, std::streamsize>{ &(cache[nextIdx][0]), outBlockSize_(nextIdx) };
@@ -107,7 +107,7 @@ namespace {
 			lk.lock();
 			loadFinished = store.blockLoadDone(input.gcount());
 			lk.unlock();
-			bufferHasData.notify_one();
+			storeHasData.notify_one();
 		} while (!loadFinished);
 		std::cout << " lastBlockSize: " << store.lastBlockSize << "\n";
 	}
@@ -123,7 +123,7 @@ namespace {
 			lk.lock();
 			writeFinished = store.blockWriteDone();
 			lk.unlock();
-			bufferHasSpace.notify_one();
+			storeHasSpace.notify_one();
 		} while (!writeFinished);
 	}
 } // namespace
