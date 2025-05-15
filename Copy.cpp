@@ -16,11 +16,16 @@ namespace {
 	constexpr std::int8_t NUM_BLOCKS = 3;
 	using block = std::array<char, BLOCK_SIZE>;
 
+	struct altBlock {
+		char data[1024 * 1024];
+		size_t size;
+	};
+
 
 	struct cache_t
 	{
 	private:
-		std::mutex mtx;
+		//std::mutex mtx;
 
 		std::int8_t nextLoadIdx_() {
 			return (loaded + 1) % NUM_BLOCKS;
@@ -100,13 +105,16 @@ namespace {
 		bool loadFinished{ false };
 		std::int8_t where = 0;
 		do {
-			std::unique_lock<std::mutex> lk(mtx);
-			auto inputPtr = store.getInputPtr(lk);
-			lk.unlock();
+			char* inputPtr;
+			{
+				std::unique_lock<std::mutex> lk(mtx);
+				inputPtr = store.getInputPtr(lk);
+			}
 			input.read(inputPtr, BLOCK_SIZE);
-			lk.lock();
-			loadFinished = store.blockLoadDone(input.gcount());
-			lk.unlock();
+			{
+				std::unique_lock<std::mutex> lk(mtx);
+				loadFinished = store.blockLoadDone(input.gcount());
+			}
 			storeHasData.notify_one();
 		} while (!loadFinished);
 		std::cout << " lastBlockSize: " << store.lastBlockSize << "\n";
