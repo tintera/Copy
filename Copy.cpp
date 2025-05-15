@@ -1,142 +1,90 @@
+#include <array>
+#include <condition_variable>
 #include <fstream>
 #include <iostream>
-#include <string>
-#include <array>
-#include <thread>
 #include <mutex>
-#include <condition_variable>
+#include <queue>
+#include <string>
+#include <thread>
 
 namespace {
 
-	std::mutex mtx;
 	std::condition_variable storeHasSpace;
 	std::condition_variable storeHasData;
 
-	constexpr size_t BLOCK_SIZE = 1'000'000; // 4KB
-	constexpr std::int8_t NUM_BLOCKS = 3;
-	using block = std::array<char, BLOCK_SIZE>;
+	constexpr std::streamsize BLOCK_SIZE = 1'000'000;
+	constexpr std::streamsize BLOCK_NUM = 3;
 
-	struct altBlock {
+	struct Block {
 		char data[1024 * 1024];
-		size_t size;
+		std::streamsize size;
 	};
 
+	auto blocks = std::make_unique< std::array<Block, BLOCK_NUM>>();
 
-	struct cache_t
-	{
-	private:
-		//std::mutex mtx;
+	std::queue<Block*> empty_;
+	std::mutex emptyMtx_;
+	std::queue<Block*> toWrite_;
+	std::mutex toWriteMtx_;
 
-		std::int8_t nextLoadIdx_() {
-			return (loaded + 1) % NUM_BLOCKS;
-		}
+	std::condition_variable waitLoad;
+	std::condition_variable waitWrite;
 
-		std::int8_t nextWriteIdx_() {
-			return (written + 1) % NUM_BLOCKS;
-		}
-
-		std::streamsize outBlockSize_(std::int8_t writeIdx) {
-			return LoadFinished() && (loaded == writeIdx) ? lastBlockSize : BLOCK_SIZE;
-		}
-
-		bool LoadFinished() {
-			return (lastBlockSize != BLOCK_SIZE);
-		}
-
-		bool WriteFinished() {
-			return LoadFinished() && (written == loaded);
-		}
-
-		std::condition_variable waitLoad;
-		std::condition_variable waitWrite;
-
-	public:
-		std::streamsize lastBlockSize = BLOCK_SIZE;
-		std::array <block, NUM_BLOCKS> cache;
-
-		char* getInputPtr(std::unique_lock<std::mutex>& lk)
-		{
-			if (isFull()) {
-				storeHasSpace.wait(lk, [this]() { return !isFull(); });
-			}
-			return &(cache[nextLoadIdx_()][0]);
-		}
-
-		auto getOutputPtr(std::unique_lock<std::mutex>& lk)
-		{
-			if (isEmpty()) {
-				storeHasData.wait(lk, [this]() { return !isEmpty(); });
-			}
-			auto nextIdx = nextWriteIdx_();
-			return std::tuple<char*, std::streamsize>{ &(cache[nextIdx][0]), outBlockSize_(nextIdx) };
-		}
-
-		// -1 nothing was done or index to an array last done.
-		std::int8_t loaded = -1;
-		std::int8_t written = -1;
-
-		bool isEmpty() {
-			return (loaded == -1) || (written == loaded);
-		}
-
-		bool isFull() {
-			return (written == nextLoadIdx_()) || (written == -1 && loaded == (NUM_BLOCKS - 1));
-		}
-
-		// One buffer has been loaded
-		bool blockLoadDone(std::streamsize bytesLoaded) {
-			lastBlockSize = bytesLoaded;
-			loaded = nextLoadIdx_();
-			return LoadFinished();
-		}
-
-		// One buffer was written
-		bool blockWriteDone() {
-			written = nextWriteIdx_();
-			return WriteFinished();
-		}
-	};
-
-	std::unique_ptr<cache_t> buffers = std::make_unique<cache_t>();
-
-
-	void reader(std::ifstream& input, cache_t& store)
+	void reader(std::ifstream& input, std::queue<Block*>& emptyBlocks, std::queue<Block*>& toWrite)
 	{
 		bool loadFinished{ false };
-		std::int8_t where = 0;
 		do {
-			char* inputPtr;
+			Block* block{};
 			{
-				std::unique_lock<std::mutex> lk(mtx);
-				inputPtr = store.getInputPtr(lk);
+				std::unique_lock<std::mutex> lk(emptyMtx_);
+				if (emptyBlocks.empty())
+				{
+					waitLoad.wait(lk, [&] { return !emptyBlocks.empty(); });
+				}
+				block = emptyBlocks.front();
+				emptyBlocks.pop();
 			}
-			input.read(inputPtr, BLOCK_SIZE);
+			std::cout << "Loading a block.\n";
+			input.read(block->data, BLOCK_SIZE);
+			block->size = input.gcount();
+			std::cout << "Loaded " << block->size << " bytes.\n";
+			loadFinished = block->size != BLOCK_SIZE;
 			{
-				std::unique_lock<std::mutex> lk(mtx);
-				loadFinished = store.blockLoadDone(input.gcount());
+				std::unique_lock<std::mutex> lk(toWriteMtx_);
+				toWrite.push(block);
 			}
-			storeHasData.notify_one();
+			waitWrite.notify_one();
+
 		} while (!loadFinished);
-		std::cout << " lastBlockSize: " << store.lastBlockSize << "\n";
 	}
 
-	void writter(std::ofstream& output, cache_t& store)
+	void writer(std::ofstream& output, std::queue<Block*>& emptyBlocks, std::queue<Block*>& toWrite)
 	{
-		bool writeFinished{ false };
+		bool writeFinished {false};
 		do {
-			std::unique_lock<std::mutex> lk(mtx);
-			auto [outPtr, amount] = store.getOutputPtr(lk);
-			lk.unlock();
-			output.write(outPtr, amount);
-			lk.lock();
-			writeFinished = store.blockWriteDone();
-			lk.unlock();
-			storeHasSpace.notify_one();
+			Block* block{};
+			{
+				std::unique_lock lk(toWriteMtx_);
+				if (toWrite.empty())
+				{
+					waitWrite.wait(lk, [&] { return !toWrite.empty(); });
+				}
+				block = toWrite.front();
+				toWrite.pop();
+			}
+			std::cout << "Writing a block.\n";
+			output.write(block->data, block->size);
+			std::cout << "Wrote " << block->size << " bytes.\n";
+			writeFinished = block->size != BLOCK_SIZE;
+			{
+				std::unique_lock lk(emptyMtx_);
+				emptyBlocks.push(block);
+			}
 		} while (!writeFinished);
 	}
 } // namespace
 
-int main(int argc, char* argv[]) {
+int main(const int argc, const char* const argv[]) {
 	try {
 		if (argc < 3) {
 			std::cerr << "Usage: " << argv[0] << " <input_file> <output_file>\n";
@@ -159,13 +107,13 @@ int main(int argc, char* argv[]) {
 			return 1;
 		}
 
-		std::thread readerThread(reader, std::ref(inputFile), std::ref(*buffers));
-		writter(outputFile, *buffers);
+		for (auto& block : *blocks)
+		{
+			empty_.push(&block);
+		}
 
-		//std::string line;
-		//while (std::getline(inputFile, line)) {
-		//    outputFile << line << "\n";
-		//}
+		std::thread readerThread(reader, std::ref(inputFile), std::ref(empty_), std::ref(toWrite_));
+		writer(outputFile, empty_, toWrite_);
 
 		inputFile.close();
 		outputFile.close();
